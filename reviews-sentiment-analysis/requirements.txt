@@ -1,0 +1,35 @@
+# Arquivo de requerimentos para Python 3.9.6
+
+# Processamento de Linguagem Natural
+nltk==3.8.1
+autocorrect==2.6.1
+spacy==3.4.4
+# Modelo para o spaCy (deve ser instalado separadamente após o spacy)
+# execute: python -m spacy download en_core_web_sm
+wordcloud==1.9.2
+
+# Análise de Dados e Machine Learning
+numpy==1.24.4
+pandas==1.5.3
+scikit-learn==1.2.2
+joblib==1.3.2
+
+# Visualização de Dados
+matplotlib==3.7.1
+plotly==5.15.0
+nbformat==4.2.0
+
+# Manipulação de Arquivos Excel
+openpyxl==3.1.2
+
+# Dependências adicionais (instaladas automaticamente, mas listadas para clareza)
+Pillow==9.5.0 # Dependência do wordcloud e matplotlib
+cycler==0.11.0 # Dependência do matplotlib
+kiwisolver==1.4.4 # Dependência do matplotlib
+pyparsing==3.0.9 # Dependência do matplotlib
+python-dateutil==2.8.2 # Dependência do pandas e matplotlib
+six==1.16.0 # Dependência de várias bibliotecas
+tqdm==4.65.0 # Dependência do nltk, spacy, etc.
+Jinja2==3.1.2 # Dependência do nltk
+regex==2023.6.3 # Dependência do nltk
+typing-extensions==4.7.1 # Dependência de várias bibliotecas
