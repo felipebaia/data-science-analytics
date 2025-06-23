@@ -50,9 +50,10 @@ class DataProcessor:
         # A função rename do pandas já espera um dicionário {antigo: novo}
         self.df = self.df.rename(columns=mapping)
 
+    # Formata o texto do DataFrame, removendo espaços em branco extras e convertendo para minúsculas.
     def _format_text(self) -> pd.DataFrame:
         """
-        Formata o texto do DataFrame, removendo espaços em branco extras e convertendo para minúsculas.
+        
         """
 
         # Formata as colunas de texto
@@ -141,7 +142,7 @@ class DataProcessor:
             # Salvar a imagem da nuvem de palavras
             filename = f"wordcloud_{sentimento}_{self.productId}.png"
             plt.savefig(os.path.join("reports", filename), bbox_inches='tight', pad_inches=0.1)
-            plt.show()
+            # plt.show()
 
     # Gerando o gráfico de barras com a contagem de palavras por classificação
     def _generate_top_words_bar_chart(self) -> None:
@@ -185,8 +186,146 @@ class DataProcessor:
 
             # Salvar a imagem da nuvem de palavras
             filename = f"chart_top_words_{sentimento}_{self.productId}.png"
-            plt.savefig(os.path.join("reports", filename), bbox_inches='tight', pad_inches=0.1)
-            fig.show()
+            fig.write_image(os.path.join("reports", filename))
+            # fig.show()
+
+    # Gera o gráfico de séries temporais com a contagem de avaliações por mês
+    def _generate_tseries_line_chart(self) -> None:
+
+        df_tseries = (self.df_formated
+              .assign(Year=lambda df: df['Time'].dt.year)
+              .assign(year_month=lambda df: df['Time'].dt.strftime('%Y%m'))
+              .groupby(['Year', 'year_month','classificacao'], as_index=False).agg(count=('ProductId', 'count'))
+              )
+
+        df_positivo = df_tseries.query("classificacao == 'Positivo'")
+        df_neutro = df_tseries.query("classificacao == 'Neutro'")
+        df_negativo = df_tseries.query("classificacao == 'Negativo'")
+
+        # Definindo o tamnho da figura
+        fix, ax = plt.subplots(figsize=(10, 6))
+
+        ax.plot(df_positivo['year_month'], df_positivo['count'], linestyle='-', color='green', label='Score')
+        ax.plot(df_neutro['year_month'], df_neutro['count'], linestyle='-', color='grey', label='Score')
+        ax.plot(df_negativo['year_month'], df_negativo['count'], linestyle='-', color='red', label='Score')
+
+        # Configuracões adicionais
+        ax.set_title('Gráfico de avaliação do produto', fontsize=16)
+        ax.set_xlabel('Data', fontsize=14, labelpad=10)
+        plt.setp(ax.get_xticklabels(), rotation=90)
+        ax.set_ylabel('Score', fontsize=14)
+        ax.legend()
+        ax.grid(True, linestyle='--', alpha=0.5)
+
+        # formatação do eixo X para datas
+        plt.tight_layout()
+        # Salvar a imagem do gráfico de séries temporais
+        filename = f"tseries_line_chart_{self.productId}.png"
+        plt.savefig(os.path.join("reports", filename), bbox_inches='tight', pad_inches=0.1)
+
+    # formata os dados, removendo as linahs sem avaliacão e balancea o dataset para o conjunto de teste e treinamento
+    def _format_balance_data(self) -> None:
+        
+        self.df['sentimento'] = self.df['Score'].apply(classificar_score) # classifica o sentimento com base na nota
+        self.df = self.df.query("Text != ''")  # Remove linhas onde o texto está vazio
+        df_concatenado = pd.DataFrame()
+
+        # Balanceamento dos dados: reduz o número de avaliações caso a classe seja superior a 50% do total de avaliações
+        for sentimento in self.df['sentimento'].unique():
+            df = self.df.query(f"sentimento == '{sentimento}'")
+            df_reduzido = pd.DataFrame()
+
+            if len(df) > len(self.df) / 2:
+                df_reduzido = df.sample(n=len(self.df) - len(df), random_state=42)  # 50% do total de avaliações serão positivas
+            else:
+                df_reduzido = df
+
+            df_concatenado = pd.concat([df_reduzido, df_concatenado], ignore_index=True)
+
+        self.df_balanceado = (df_concatenado
+                    .assign(
+                        formated_text=lambda df: df['Text']
+                            .str.replace(r'<.*?>', '', regex=True)                      # Remove HTML tags
+                            .str.translate(str.maketrans('', '', string.punctuation))   # Remove prontuação
+                            .str.replace(r'\s+', ' ', regex=True)                       # Remove espaços extras
+                            .str.strip()                                                # Remove espaços no início e no fim
+                            .str.replace(r'\b\w{30,}\b', '', regex=True)                # Remove palavras com mais de 30 letras
+                            .str.lower()                                                # Lowercase
+                            .str.replace(r'\d+', '', regex=True)                        # Remove números
+                            .apply(
+                                lambda text: (
+                                    ' '.join([w for w in text.split() if w not in self.forbbiden_words])
+                                    if getattr(self, 'forbbiden_words', None)
+                                    else text
+                                )
+                            )  # Remove palavras do nome do produto se houver
+            ))
+        
+        # Retorna o DataFrame formatado e balanceado        
+        return self.df_balanceado
+
+    # Treinando o modelo de machine learning
+    def _find_best_model(self) -> object:
+        # Supondo que 'X' são suas features (texto do review) e 'y' é a coluna 'sentimento'
+        X = self.df_balanceado['formated_text']
+        y = self.df_balanceado['sentimento']
+
+        self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(
+            X, y,
+            test_size=0.25,      # Ou 0.2, 0.3, dependendo da sua preferência
+            stratify=y,          # <-- O PARÂMETRO MAIS IMPORTANTE!
+            random_state=42      # Para reprodutibilidade
+        )
+
+        # 1. Criar um Pipeline que combina o vetorizador e o modelo
+        # Isso garante que os dados de validação dentro do GridSearchCV não "vazem" para o treinamento, tornando a avaliação mais robusta.
+        pipeline = Pipeline([ 
+            ('vect', CountVectorizer()),
+            ('clf', MultinomialNB()),
+        ])
+
+        # 2. Definir a grade de parâmetros que você quer testar
+        # A sintaxe é 'nome_da_etapa__nome_do_parâmetro'
+        parameters = {
+            'vect__ngram_range': [(1, 1), (1, 2)],  # Testa unigramas e bigramas
+            'vect__max_df': (0.5, 0.75, 1.0),      # Ignora palavras muito frequentes
+            'clf__alpha': (0.1, 0.5, 1.0),         # Parâmetro de suavização do Naive Bayes
+        }
+
+        # 3. Criar e treinar o GridSearchCV
+        # cv=5 significa 5-fold cross-validation
+        # n_jobs=-1 usa todos os processadores disponíveis para acelerar
+        grid_search = GridSearchCV(pipeline, parameters, cv=5, n_jobs=-1, verbose=1)
+        grid_search.fit(self.X_train, self.y_train)
+
+        # Avaliar o melhor modelo encontrado no conjunto de teste
+        self.best_model = grid_search.best_estimator_
+        accuracy_test = self.best_model.score(self.X_test, self.y_test)
+        print("Acurácia no conjunto de teste: ", accuracy_test)
+
+    # Gera o gráfico de matriz de confusão
+    def _generate_confusion_matrix(self) -> None:
+        # Predições no conjunto de teste
+        self.y_pred = self.best_model.predict(self.X_test)
+
+        # Avaliando a acurácia do modelo
+        accuracy = accuracy_score(self.y_test, self.y_pred)
+        print(f"Acurácia do modelo: {accuracy:.2f}")
+
+        # Exibindo a matriz de confusão
+        cm = confusion_matrix(self.y_test, self.y_pred, labels=self.best_model.classes_)
+        disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=self.best_model.classes_)
+        disp.plot(cmap=plt.cm.Blues)
+        plt.title('Matriz de Confusão')
+        # Salvar a imagem do gráfico de séries temporais
+        filename = f"confusion_matrix_chart.png"
+        plt.savefig(os.path.join("reports", filename), bbox_inches='tight', pad_inches=0.1)
+        
+    # Salvando o modelo gerado
+    def _saving_best_model(self) -> None:
+        
+        filename = f"modelo_sentimento_pipeline.joblib"
+        joblib.dump(self.best_model, os.path.join("model", filename))
 
     # Orquestra o processo completo: carregar, validar e renomear
     def process(self) -> pd.DataFrame:
@@ -198,7 +337,11 @@ class DataProcessor:
         self._tokenize_and_lemmatize()
         self._generate_wordcloud()
         self._generate_top_words_bar_chart()
+        self._generate_tseries_line_chart()
+        self._format_balance_data()
+        self._find_best_model()
+        self._saving_best_model()
+        self._generate_confusion_matrix()
 
         print("Processamento concluído com sucesso!")
-        return self.df_tokens
-        # return self.df
+        return self.df_balanceado

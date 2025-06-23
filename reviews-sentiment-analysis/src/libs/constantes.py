@@ -9,9 +9,10 @@ from nltk.corpus import stopwords, wordnet
 from nltk.tokenize import ToktokTokenizer
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.naive_bayes import MultinomialNB
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import accuracy_score, confusion_matrix, ConfusionMatrixDisplay
+from sklearn.pipeline import Pipeline
+from sklearn.model_selection import GridSearchCV, train_test_split
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
-from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
 import pandas as pd
 import matplotlib.pyplot as plt
 from wordcloud import WordCloud
