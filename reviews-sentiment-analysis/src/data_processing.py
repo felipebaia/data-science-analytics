@@ -2,17 +2,25 @@
 from src.libs.constantes import * # Cuidado com imports usando '*', é melhor importar o necessário explicitamente
 from src.libs.utils import *
 
-class DataProcessor:
+class SentimentAnalysisModel:
 
-    def __init__(self, file_path: str, column_mapping: Dict[str, str], product_name: Optional[str] = None, language: str = 'en') -> None:
+    def __init__(self, file_path: str, column_mapping: Dict[str, str], mode: str, product_name: Optional[str] = None, language: str = 'en') -> None:
 
-        self.spell = Speller(lang=rf'{language}')
-        self.stopwords = initialize_stopwords(language)
-        self.file_path = file_path # O caminho para o arquivo a ser processado.
-        self.column_mapping = column_mapping # column_mapping (Dict[str, str]): Mapeamento de colunas.
+        self.file_path = file_path
+        self.column_mapping = column_mapping
+        self.mode = mode
         self.productId = product_name
-        self.df: Optional[pd.DataFrame] = None # O DataFrame começa como nulo
-        print(f"Inicializando DataProcessor com arquivo: {self.file_path} e mapeamento de colunas: {self.column_mapping}")
+        self.language = language
+        self.model_path = os.path.join("model", "modelo_sentimento_pipeline.joblib")
+
+        # Ferramentas de pré-processamento
+        self.spell = Speller(lang=rf'{language}') # Descomente se tiver a lib Speller
+        self.stopwords = initialize_stopwords(language)
+        
+        self.df: Optional[pd.DataFrame] = None
+        self.best_model: Optional[Pipeline] = None
+        
+        print(f"Inicializando em modo: '{self.mode}'")
 
     # Carrega os dados do arquivo especificado no self.file_path.
     def _load_data(self) -> None:
@@ -21,27 +29,21 @@ class DataProcessor:
         self.df = read_file(self.file_path)
 
         # Verificar se o DataFrame é vazio
-        if self.df is None:
+        if self.df is None or self.df.empty:
             raise ValueError("O DataFrame não foi carregado corretamente. Verifique o caminho do arquivo e o formato.")
-        # Verifica se o DataFrame está vazio
-        if self.df.empty:
-            raise ValueError("O DataFrame carregado está vazio. Verifique o arquivo de entrada.")
 
     # Valida se as colunas de origem esperadas existem no DataFrame. Levanta um ValueError se alguma coluna estiver faltando
     def _validate_columns(self) -> None:
 
-        expected_source_columns = set(self.column_mapping.values())
-        actual_columns = set(self.df.columns)
+        expected = set(self.column_mapping.values())
+        actual = set(self.df.columns)
         
-        missing_columns = expected_source_columns - actual_columns
-        if missing_columns:
-            raise ValueError(f"As seguintes colunas esperadas não foram encontradas no arquivo: {missing_columns}")
+        missing = expected - actual
+        if missing:
+            raise ValueError(f"As seguintes colunas esperadas não foram encontradas no arquivo: {missing}")
 
     # Renomeia as colunas do DataFrame com base no mapeamento fornecido
     def _rename_columns(self) -> None:
-        
-        if self.df is None:
-            raise ValueError("O DataFrame não foi carregado.")
         
         # Mapping para renomear as colunas
         mapping = dict(zip(self.column_mapping.values(), column_name_mapping.values()))
@@ -52,9 +54,6 @@ class DataProcessor:
 
     # Formata o texto do DataFrame, removendo espaços em branco extras e convertendo para minúsculas.
     def _format_text(self) -> pd.DataFrame:
-        """
-        
-        """
 
         # Formata as colunas de texto
         self.forbbiden_words = extrair_palavras_produto(self.productId)
@@ -223,86 +222,6 @@ class DataProcessor:
         filename = f"tseries_line_chart_{self.productId}.png"
         plt.savefig(os.path.join("reports", filename), bbox_inches='tight', pad_inches=0.1)
 
-    # formata os dados, removendo as linahs sem avaliacão e balancea o dataset para o conjunto de teste e treinamento
-    def _format_balance_data(self) -> None:
-        
-        self.df['sentimento'] = self.df['Score'].apply(classificar_score) # classifica o sentimento com base na nota
-        self.df = self.df.query("Text != ''")  # Remove linhas onde o texto está vazio
-        df_concatenado = pd.DataFrame()
-
-        # Balanceamento dos dados: reduz o número de avaliações caso a classe seja superior a 50% do total de avaliações
-        for sentimento in self.df['sentimento'].unique():
-            df = self.df.query(f"sentimento == '{sentimento}'")
-            df_reduzido = pd.DataFrame()
-
-            if len(df) > len(self.df) / 2:
-                df_reduzido = df.sample(n=len(self.df) - len(df), random_state=42)  # 50% do total de avaliações serão positivas
-            else:
-                df_reduzido = df
-
-            df_concatenado = pd.concat([df_reduzido, df_concatenado], ignore_index=True)
-
-        self.df_balanceado = (df_concatenado
-                    .assign(
-                        formated_text=lambda df: df['Text']
-                            .str.replace(r'<.*?>', '', regex=True)                      # Remove HTML tags
-                            .str.translate(str.maketrans('', '', string.punctuation))   # Remove prontuação
-                            .str.replace(r'\s+', ' ', regex=True)                       # Remove espaços extras
-                            .str.strip()                                                # Remove espaços no início e no fim
-                            .str.replace(r'\b\w{30,}\b', '', regex=True)                # Remove palavras com mais de 30 letras
-                            .str.lower()                                                # Lowercase
-                            .str.replace(r'\d+', '', regex=True)                        # Remove números
-                            .apply(
-                                lambda text: (
-                                    ' '.join([w for w in text.split() if w not in self.forbbiden_words])
-                                    if getattr(self, 'forbbiden_words', None)
-                                    else text
-                                )
-                            )  # Remove palavras do nome do produto se houver
-            ))
-        
-        # Retorna o DataFrame formatado e balanceado        
-        return self.df_balanceado
-
-    # Treinando o modelo de machine learning
-    def _find_best_model(self) -> object:
-        # Supondo que 'X' são suas features (texto do review) e 'y' é a coluna 'sentimento'
-        X = self.df_balanceado['formated_text']
-        y = self.df_balanceado['sentimento']
-
-        self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(
-            X, y,
-            test_size=0.25,      # Ou 0.2, 0.3, dependendo da sua preferência
-            stratify=y,          # <-- O PARÂMETRO MAIS IMPORTANTE!
-            random_state=42      # Para reprodutibilidade
-        )
-
-        # 1. Criar um Pipeline que combina o vetorizador e o modelo
-        # Isso garante que os dados de validação dentro do GridSearchCV não "vazem" para o treinamento, tornando a avaliação mais robusta.
-        pipeline = Pipeline([ 
-            ('vect', CountVectorizer()),
-            ('clf', MultinomialNB()),
-        ])
-
-        # 2. Definir a grade de parâmetros que você quer testar
-        # A sintaxe é 'nome_da_etapa__nome_do_parâmetro'
-        parameters = {
-            'vect__ngram_range': [(1, 1), (1, 2)],  # Testa unigramas e bigramas
-            'vect__max_df': (0.5, 0.75, 1.0),      # Ignora palavras muito frequentes
-            'clf__alpha': (0.1, 0.5, 1.0),         # Parâmetro de suavização do Naive Bayes
-        }
-
-        # 3. Criar e treinar o GridSearchCV
-        # cv=5 significa 5-fold cross-validation
-        # n_jobs=-1 usa todos os processadores disponíveis para acelerar
-        grid_search = GridSearchCV(pipeline, parameters, cv=5, n_jobs=-1, verbose=1)
-        grid_search.fit(self.X_train, self.y_train)
-
-        # Avaliar o melhor modelo encontrado no conjunto de teste
-        self.best_model = grid_search.best_estimator_
-        accuracy_test = self.best_model.score(self.X_test, self.y_test)
-        print("Acurácia no conjunto de teste: ", accuracy_test)
-
     # Gera o gráfico de matriz de confusão
     def _generate_confusion_matrix(self) -> None:
         # Predições no conjunto de teste
@@ -320,28 +239,151 @@ class DataProcessor:
         # Salvar a imagem do gráfico de séries temporais
         filename = f"confusion_matrix_chart.png"
         plt.savefig(os.path.join("reports", filename), bbox_inches='tight', pad_inches=0.1)
+
+    # formata os dados, removendo as linahs sem avaliacão e balancea o dataset para o conjunto de teste e treinamento
+    def _format_balance_data(self) -> None:
         
-    # Salvando o modelo gerado
+        # Carregue os dados brutos se ainda não foram carregados
+        if self.df is None:
+            self._load_data()
+            self._validate_columns()
+            self._rename_columns()
+
+        self.df['sentimento'] = self.df['Score'].apply(classificar_score)
+        # garantir que self.df se torne um objeto DataFrame completamente novo e independente na memória.
+        self.df = self.df.query("Text != ''").copy()
+
+        df_concatenado = pd.DataFrame()
+
+        for sentimento in self.df['sentimento'].unique():
+            df_sentiment = self.df.query(f"sentimento == '{sentimento}'")
+            df_reduzido = df_sentiment
+
+            if len(df_sentiment) > len(self.df) / 2:
+                n_samples = max(1, len(self.df) - len(df_sentiment))
+                df_reduzido = df_sentiment.sample(n=n_samples, random_state=42)
+
+            df_concatenado = pd.concat([df_reduzido, df_concatenado], ignore_index=True)
+        
+        # Text cleaning
+        df_concatenado['formated_text'] = (df_concatenado['Text']
+            .str.replace(r'<.*?>', '', regex=True)
+            .str.translate(str.maketrans('', '', string.punctuation))
+            .str.replace(r'\s+', ' ', regex=True)
+            .str.strip()
+            .str.lower()
+            .str.replace(r'\d+', '', regex=True)
+        )
+        
+        # Garante que o DataFrame não está vazio após o processamento
+        if df_concatenado.empty:
+            raise ValueError("O DataFrame ficou vazio após o balanceamento e formatação. Verifique os dados de entrada.")
+        
+        print(f"Dados formatados e balanceados. Total de amostras: {len(df_concatenado)}")
+        return df_concatenado
+
+    # Salva o modelo treinado no caminho especificado
     def _saving_best_model(self) -> None:
         
-        filename = f"modelo_sentimento_pipeline.joblib"
-        joblib.dump(self.best_model, os.path.join("model", filename))
+        if self.best_model:
+            print(f"Salvando modelo em: {self.model_path}")
+            joblib.dump(self.best_model, self.model_path)
+        else:
+            print("Nenhum modelo para salvar.")
+    
+    # Treina um novo modelo e apaga qualquer modelo existente e treina um novo do zero usando GridSearchCV.
+    def _train_new_model(self) -> None:
+
+        print("--- INICIANDO TREINAMENTO DE NOVO MODELO ---")
+        
+        df_treino = self._format_balance_data()
+        X = df_treino['formated_text']
+        y = df_treino['sentimento']
+
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.25, stratify=y, random_state=42)
+
+        pipeline = Pipeline([
+            ('vect', CountVectorizer()),
+            ('clf', MultinomialNB()),
+        ])
+
+        parameters = {
+            'vect__ngram_range': [(1, 1), (1, 2)],
+            'vect__max_df': (0.5, 0.75, 1.0),
+            'clf__alpha': (0.1, 0.5, 1.0),
+        }
+
+        grid_search = GridSearchCV(pipeline, parameters, cv=5, n_jobs=-1, verbose=1)
+        grid_search.fit(X_train, y_train)
+
+        self.best_model = grid_search.best_estimator_
+        print("\nMelhores parâmetros encontrados:")
+        print(grid_search.best_params_)
+
+        # Avaliar e salvar
+        accuracy = self.best_model.score(X_test, y_test)
+        print(f"\nAcurácia do novo modelo no conjunto de teste: {accuracy:.4f}")
+        
+        self._saving_best_model()
+        # Gerando a matriz de confusão
+        self._generate_confusion_matrix(X_test, y_test)
+
+    # Carrega um modelo existente e o alimenta com novos dados.
+    def _update_existing_model(self) -> None:
+        
+        print("--- INICIANDO ATUALIZAÇÃO DE MODELO EXISTENTE ---")
+        
+        # 1. Verificar e carregar o modelo existente
+        if not os.path.exists(self.model_path):
+            raise FileNotFoundError(f"Arquivo do modelo não encontrado em '{self.model_path}'. "
+                                    "Execute o modo 'novo' primeiro para criar um modelo.")
+        
+        print(f"Carregando modelo de '{self.model_path}'...")
+        self.best_model = joblib.load(self.model_path)
+
+        # 2. Preparar os novos dados
+        df_novos_dados = self._format_balance_data()
+        X_new = df_novos_dados['formated_text']
+        y_new = df_novos_dados['sentimento']
+
+        # 3. Extrair componentes do pipeline
+        vectorizer = self.best_model.named_steps['vect']
+        classifier = self.best_model.named_steps['clf']
+
+        # 4. Usar o vetorizador JÁ TREINADO para transformar os novos dados
+        print("Transformando novos dados com o vocabulário existente...")
+        X_new_transformed = vectorizer.transform(X_new)
+
+        # 5. Treinamento incremental com partial_fit
+        print("Alimentando o classificador com os novos dados (treinamento incremental)...")
+        # O `partial_fit` precisa saber todas as classes possíveis. Como o modelo já foi treinado, ele já as conhece.
+        classifier.partial_fit(X_new_transformed, y_new)
+
+        print("Modelo atualizado com sucesso.")
+        
+        # 6. Salvar o modelo atualizado de volta no disco
+        self._saving_best_model()
 
     # Orquestra o processo completo: carregar, validar e renomear
     def process(self) -> pd.DataFrame:
 
-        self._load_data()
-        self._validate_columns()
-        self._rename_columns() # Retorna o self.df já renomeado
-        self._format_text()
-        self._tokenize_and_lemmatize()
-        self._generate_wordcloud()
-        self._generate_top_words_bar_chart()
-        self._generate_tseries_line_chart()
-        self._format_balance_data()
-        self._find_best_model()
-        self._saving_best_model()
-        self._generate_confusion_matrix()
+        # Orquestrador principal do processo
+        if self.mode == 'novo':
+            self._train_new_model()
 
-        print("Processamento concluído com sucesso!")
-        return self.df_balanceado
+        elif self.mode == 'atualizar':
+            self._update_existing_model()
+
+        else:
+            raise ValueError("Modo inválido. Escolha 'novo' ou 'atualizar'.")
+
+        print("Processo concluído.")
+
+        # Opcional: Gerar relatórios após o processo
+        if self.productId:
+            print("Gerando relatórios para o produto...")
+            self._format_text()
+            self._tokenize_and_lemmatize()
+            self._generate_wordcloud()
+            self._generate_top_words_bar_chart()
+            self._generate_tseries_line_chart()

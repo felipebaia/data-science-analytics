@@ -4,3 +4,4 @@ venv
 _*
 *.joblib
 *.png
+*.xlsx
